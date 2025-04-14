@@ -2,7 +2,9 @@ import requests
 import os 
 from dotenv import load_dotenv
 import base64
-from datetime import datetime
+from datetime import datetime , timezone
+from psycopg2 import *
+import json
 
 
 load_dotenv(dotenv_path='/Users/luis/Documents/shoopify_api/shopifyenviroment/credentials_aircall.env')
@@ -14,42 +16,82 @@ api_id = os.getenv('api_id')
 
 auth = (api_id,api_token)
 
+
+load_dotenv(dotenv_path='/Users/luis/Documents/ia_project/myenviromet/credential_postgresql.env')
+db_config = {
+    'dbname': os.getenv('database'),
+    'user': os.getenv('username'),
+    'password': os.getenv('password'),
+    'host': os.getenv('host'),
+    'port': os.getenv('port')
+}
+
+
+
 def FetchAll(url, auth):
-    #Response
+    # Response
     All_Calls = []
-    current =  url
+    current = url
 
     while current:
-        response = requests.get(current, auth=auth)
-        Json = response.json()
+        try:
+            response = requests.get(current, auth=auth)
+            response.raise_for_status()  # Check for HTTP errors
+            Json = response.json()
 
-        JsonCalls = Json['calls']
-        MetaData = Json['meta']
-        for Call in JsonCalls:
-            call_data = {
-                'call_id': Call.get('id'),
-                'direction': Call.get('direction'),
-                'duration': Call.get('duration'),
-                
-            }
-            print(call_data)
+            # Cada Response me Devuelve ->
+            JsonCalls = Json['calls']  # Una Lista de las Llamadas de una Pagina
+            MetaData = Json['meta']  # Metadata para Acceder a las demas Paginas y conocer el numero de la actual
+            for Call in JsonCalls:
+                user_info = Call.get('user') or {}  # User puede ser un Objeto None 
+                call_data = {  # Datos de la Llamada
+                    'call_id': Call.get('id'),
+                    'call_status': Call.get('status'),
+                    'call_direction': Call.get('direction'),
+                    'call_missed_reason': Call.get('missed_call_reason'),
+                    'call_duration': Call.get('duration'),
+                    'call_started_at': datetime.fromtimestamp(int(Call['started_at']), timezone.utc).strftime('%Y-%m-%d %H:%M:%S') if Call.get('started_at') else None,
+                    'call_answered_at': datetime.fromtimestamp(int(Call['answered_at']), timezone.utc).strftime('%Y-%m-%d %H:%M:%S') if Call.get('answered_at') else None,
+                    'call_ended_at': datetime.fromtimestamp(int(Call['ended_at']), timezone.utc).strftime('%Y-%m-%d %H:%M:%S') if Call.get('ended_at') else None,  
+                    'call_raw_digits': Call.get('raw_digits'),
+                    'call_tags': json.dumps(Call.get('tags')),
+                    'call_teams': json.dumps(Call.get('teams')),  
+                    # User info
+                    'user_id': user_info.get('id'),
+                    'user_name': user_info.get('name'),
+                    'user_email': user_info.get('email'),
+                    'user_created_at': user_info.get('created_at'),
+                    'user_state': user_info.get('state'),
+                    'user_availability': user_info.get('availability_status'),
+                }
+                # Agregamos cada Registro a la Lista
+                All_Calls.append(call_data)
+                # print(call_data)
 
-        print(MetaData['current_page'])
-         #Test Breaker
-        if MetaData['current_page'] == 5:
+            # Imprime el numero de la pagina actual
+            print(MetaData['current_page'])
+
+            # Revisa que hayan más páginas
+            current = MetaData.get('next_page_link')
+
+        except requests.exceptions.RequestException as e:
+            print(f"Request error: {e}")
+            # Maneja errores relacionados con las solicitudes HTTP, como problemas de conexión o tiempos de espera
             break
-        else:    
-            current = MetaData['next_page_link']
-
-       
+        except KeyError as e:
+            print(f"Key error: {e}")
+            # Maneja errores cuando las claves esperadas no están presentes en la respuesta JSON.
+            break
+        except ValueError as e:
+            print(f"Value error: {e}")
+            # Maneja errores relacionados con conversiones de tipo incorrectas o valores inesperados como None a INT.
+            break
     
-    print("Finish")
-        
+    print("Fetching Finished")
+    return All_Calls
 
 
-
-
-
+#Only Works for a Single ID
 def Fetch_Test(url,auth):
     # Al Ejecutar la Peticion, le pasamos los Tokens de Auth y el Endpoint
     # NOTA - Auth es una Lista que obtiene tanto el ID como el Token de la API desde el .env
@@ -121,22 +163,53 @@ def Fetch_Test(url,auth):
         #print (number_dict)
         print(json_response)
 
-def FetchAll_Test(url, auth):
-    response = requests.get(url,auth=auth)
 
-    if response.status_code == 401:
-        print("Error")
-    else:
-        json_response = response.json()
-        print(json_response)
+# WORKING 100%
 
 
-#all = Fetch_Calls(url,auth)
-#for i in range(10):
-#    print(all[i])
+def InsertCalls(all_calls, db_config):
+    try:
+        # Conectar a la base de datos
+        conn = connect(**db_config)
+        cursor = conn.cursor()
 
-#FetchAll_Test(url,auth)
-# Example usage
-FetchAll(url,auth)
+        # Preparar la sentencia SQL de inserción
+        insert_query = """
+        INSERT INTO api_aircall (call_id, call_status, call_direction, call_missed_reason, call_duration, call_started_at, call_answered_at, call_ended_at, call_raw_digits, call_tags, call_teams, user_id, user_name, user_email, user_created_at, user_state, user_availability)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (call_id) DO NOTHING
+        """
+
+        # Insertar cada llamada en la base de datos
+        for call in all_calls:
+            cursor.execute(insert_query, (
+                call['call_id'], call['call_status'], call['call_direction'], call.get('call_missed_reason'),
+                call['call_duration'], call['call_started_at'], call.get('call_answered_at'), call['call_ended_at'],
+                call.get('call_raw_digits'), call.get('call_tags'), call.get('call_teams'), call.get('user_id'),
+                call.get('user_name'), call.get('user_email'), call.get('user_created_at'),
+                call.get('user_state'), call.get('user_availability')
+            ))
+            print(f"Data inserted: {call['call_id']}")
+
+        # Confirmar la transacción
+        conn.commit()
+
+    except Error as e:
+        print(f"Error inserting data: {e}")
+        conn.rollback()
+
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
+        print("Database connection closed.")
+
+# Configuración de la base de datos
 
 
+# Llamar a la función FetchAll para obtener los datos y luego insertar en la base de datos
+All_Calls = FetchAll(url, auth)
+
+#Inserta los Registros en la DB
+InsertCalls(All_Calls, db_config)
