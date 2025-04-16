@@ -3,10 +3,21 @@ import base64
 from dotenv import load_dotenv
 import requests
 import json
+import psycopg2
 
 # Load environment variables from .env file
 load_dotenv(dotenv_path='/Users/josias/Documents/GoogleSheet_API/mynewenviroment/credentials_livechat_api.env')
 auth_key = os.getenv('AUTH_KEY')
+
+# Load PostgreSQL Credentials from .env file
+load_dotenv(dotenv_path='/Users/josias/Documents/GoogleSheet_API/mynewenviroment/credentials_postgresql.env')
+db_config = {
+    'dbname': 'masayaco_dev',
+    'user': os.getenv('username'),
+    'password': os.getenv('password'),
+    'host': os.getenv('host'),
+    'port': os.getenv('port')
+}
 
 # Check if the API key is loaded
 if not auth_key:
@@ -218,6 +229,37 @@ def list_chats(page_id=None, limit=100):
         return None
 
 
+
+def Insert_Agents(all_agents):
+    try:
+        conn = psycopg2.connect(**db_config)
+        cursor = conn.cursor()
+
+        #Insert Agents Query
+        Query = """
+            INSERT INTO erp_livechat_agents (agent_id, agent_name, agent_mail, agent_role)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (agent_id) DO NOTHING;
+        """
+
+        for agent in all_agents:
+            cursor.execute(Query, (agent['agent_id'],agent['agent_name'], agent['agent_mail'], agent['agent_role']))
+            print(f"Inserting Agent: {agent['agent_name']} - {agent['agent_role']}")
+        
+        conn.commit()
+        print(f"Committed {len(all_agents)} Agents.")
+
+        # Close the cursor and connection
+        cursor.close()
+        conn.close()
+    except psycopg2.Error as e:
+        print(f"Database error: {e}")
+        raise  # Stop the entire process on any database error
+
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        raise  # Stop the entire process on any unexpected error
+
 if __name__ == "__main__":
     try:
         #all_chats = list_chats(limit=100)  # Get chats with a limit
@@ -227,8 +269,9 @@ if __name__ == "__main__":
         #   print("Failed to retrieve chats.")
 
         All_Agents = list_agents()
-        print(All_Agents)
-        print(f'Total Agents: {len(All_Agents)}')
+    
+        Insert_Agents(All_Agents)
+        print('FINISH')
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
 
